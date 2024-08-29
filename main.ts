@@ -1,134 +1,179 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, MarkdownView, Modal, Notice, Plugin, TFile, TAbstractFile } from 'obsidian';
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
-}
-
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
-
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class BacklinksPlugin extends Plugin {
 
 	async onload() {
-		await this.loadSettings();
-
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
 		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
+			id: 'open-float-menu-backlinks',
+			name: 'Open float menu backlinks',
 			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+				const activeFile = this.app.workspace.getActiveFile();
+				if (activeFile) {
+					new BacklinksModal(this.app, activeFile).open();
+				} else {
+					new Notice('No active file found!');
 				}
 			}
 		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
 	}
 
 	onunload() {
-
-	}
-
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
+		// Код для очистки ресурсов, если необходимо
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
+class BacklinksModal extends Modal {
+	file: TFile;
+	backlinks: { file: TFile, header?: string }[] = [];
+
+	constructor(app: App, file: TFile) {
 		super(app);
+		this.file = file;
+		this.backlinks = this.getBacklinks();
 	}
 
 	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
+		const { contentEl } = this;
+
+		if (this.backlinks.length === 0) {
+			contentEl.setText('No backlinks found!');
+			return;
+		}
+
+		const listEl = contentEl.createEl('ul');
+		listEl.addClass('backlinks-list');
+
+		this.backlinks.forEach((backlink, index) => {
+			const listItemEl = listEl.createEl('li');
+			listItemEl.addClass('backlink-item');
+
+			const linkText = backlink.header ? `${backlink.file.basename} -> ${backlink.header}` : backlink.file.basename;
+			listItemEl.setText(linkText);
+			listItemEl.tabIndex = 0;
+
+			listItemEl.addEventListener('focus', () => {
+				listItemEl.addClass('is-focused');
+			});
+
+			listItemEl.addEventListener('blur', () => {
+				listItemEl.removeClass('is-focused');
+			});
+
+			listItemEl.onkeydown = async (evt: KeyboardEvent) => {
+				if (evt.key === 'Enter') {
+					await this.navigateToBacklink(backlink);
+					this.close();
+				} else if (evt.key === 'ArrowDown') {
+					(listItemEl.nextElementSibling as HTMLElement)?.focus();
+				} else if (evt.key === 'ArrowUp') {
+					(listItemEl.previousElementSibling as HTMLElement)?.focus();
+				}
+			};
+
+			listItemEl.onclick = async () => {
+				await this.navigateToBacklink(backlink);
+				this.close();
+			};
+		});
+
+		(listEl.firstChild as HTMLElement)?.focus();
 	}
 
 	onClose() {
-		const {contentEl} = this;
+		const { contentEl } = this;
 		contentEl.empty();
 	}
+
+	getBacklinks(): { file: TFile, header?: string }[] {
+		if (!this.file) {
+			new Notice('Current file is not defined.');
+			return [];
+		}
+	
+		const backlinks: { file: TFile, header?: string }[] = [];
+	
+		this.app.vault.getMarkdownFiles().forEach(file => {
+			// Проверка ссылок в содержимом файла
+			const links = this.app.metadataCache.getFileCache(file)?.links;
+			if (links) {
+				links.forEach(link => {
+					if (link.link.includes(this.file.basename)) {
+						const headerMatch = link.link.match(/#([^\]]+)/);
+						backlinks.push({
+							file: file,
+							header: headerMatch ? headerMatch[1] : undefined
+						});
+					}
+				});
+			}
+	
+			// Проверка метаданных YAML фронтматтера
+			const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+			if (frontmatter && frontmatter.parent) {
+				const parentLinks = Array.isArray(frontmatter.parent) ? frontmatter.parent : [frontmatter.parent];
+				parentLinks.forEach(parentLink => {
+					if (parentLink.includes(this.file.basename)) {
+						backlinks.push({
+							file: file,
+							header: undefined // Для метаданных нет заголовков, устанавливаем undefined
+						});
+					}
+				});
+			}
+		});
+	
+		return backlinks;
+	}
+
+	async navigateToBacklink(backlink: { file: TFile, header?: string }) {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (view) {
+			await view.leaf.openFile(backlink.file, { active: true });
+			if (backlink.header) {
+				await this.moveToHeader(backlink.file, backlink.header);
+			}
+		} else {
+			const leaf = this.app.workspace.getLeaf(false);
+			await leaf.openFile(backlink.file, { active: true });
+			if (backlink.header) {
+				await this.moveToHeader(backlink.file, backlink.header);
+			}
+		}
+	}
+
+async moveToHeader(file: TFile, header: string) {
+    const doc = await this.app.vault.read(file);
+    const lines = doc.split('\n');
+    let headerPosition = -1;
+
+    // Регулярное выражение для поиска строки вида "#text]]"
+    const headerRegex = new RegExp(`#${header}\\]\\]`, 'i');
+	
+    // Найти строку с заголовком, который содержит ссылку
+    for (let i = 0; i < lines.length; i++) {
+        if (headerRegex.test(lines[i])) {
+			headerPosition = i;
+			break;
+        }
+    }
+
+    if (headerPosition !== undefined) {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (view) {
+            const editor = view.editor;
+            const viewportHeight = view.containerEl.clientHeight; // Высота видимой области редактора
+            const numberOfVisibleLines = Math.floor(viewportHeight / 20); // Приблизительная высота строки
+
+            // Установить курсор на строку с заголовком
+            editor.setCursor({ line: headerPosition, ch: 0 });
+
+            // Прокрутить страницу так, чтобы строка с курсором оказалась в середине видимой части
+            const middleLine = Math.floor(numberOfVisibleLines / 2);
+            const scrollLine = Math.max(0, headerPosition - middleLine);
+            editor.scrollIntoView({ from: { line: scrollLine, ch: 0 }, to: { line: scrollLine + numberOfVisibleLines, ch: 0 } });
+        }
+    } else {
+        new Notice(`Header "${header}" not found in file "${file.basename}"`);
+    }
 }
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
 }
